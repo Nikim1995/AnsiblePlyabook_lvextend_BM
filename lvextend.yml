@@ -1,0 +1,77 @@
+---
+- name: Check if logical volume can be extended
+  hosts: all
+  become: yes
+  vars:
+    vg_name: vg-ubuntu
+    lv_name: var
+    change_mode: false   # 👈 Set to true to actually extend LV and resize filesystem
+  vars_files:
+    - vault.yml
+
+  tasks:
+
+    - name: Get free space in the volume group
+      command: vgs --noheadings --units g -o vg_free {{ vg_name }}
+      register: vg_free_result
+      changed_when: false
+
+    - name: Convert free space output to numeric value
+      set_fact:
+        vg_free_gb: "{{ vg_free_result.stdout | regex_search('[0-9.]+') | default('0') | float }}"
+
+    - name: Get logical volume size
+      command: lvs --noheadings --units g -o lv_size /dev/{{ vg_name }}/{{ lv_name }}
+      register: lv_size_result
+      changed_when: false
+
+    - name: Convert LV size output to numeric value
+      set_fact:
+        lv_size_gb: "{{ lv_size_result.stdout | regex_search('[0-9.]+') | default('0') | float }}"
+
+    - name: Display VG and LV information
+      debug:
+        msg:
+          - "Volume Group: {{ vg_name }}"
+          - "Logical Volume: /dev/{{ vg_name }}/{{ lv_name }}"
+          - "Current LV size: {{ lv_size_gb }} GB"
+          - "Free space in VG: {{ vg_free_gb }} GB"
+          - "Mode: {{ 'Change mode (will extend LV)' if change_mode | bool else 'Check mode (no changes applied)' }}"
+
+    - name: Report available free space
+      debug:
+        msg: "The logical volume can be extended by up to {{ vg_free_gb }} GB."
+      when: vg_free_gb | float > 0
+
+    - name: Report no free space available
+      debug:
+        msg: "No free space available in {{ vg_name }}."
+      when: vg_free_gb | float == 0
+
+    - name: Extend logical volume if free space available and change_mode enabled
+      command: lvextend -l +100%FREE  /dev/{{ vg_name }}/{{ lv_name }}
+      when:
+        - vg_free_gb | float > 0
+        - change_mode | bool
+      register: lvextend_result
+
+    - name: Resize filesystem after LV extension
+      command: resize2fs /dev/{{ vg_name }}/{{ lv_name }}
+      when:
+        - vg_free_gb | float > 0
+        - change_mode | bool
+
+    - name: Show updated logical volume information
+      command: lvs /dev/{{ vg_name }}/{{ lv_name }}
+      register: lvs_result
+      changed_when: false
+      when:
+        - vg_free_gb | float > 0
+        - change_mode | bool
+
+    - name: Display LV result after resize
+      debug:
+        var: lvs_result.stdout
+      when:
+        - vg_free_gb | float > 0
+        - change_mode | bool
